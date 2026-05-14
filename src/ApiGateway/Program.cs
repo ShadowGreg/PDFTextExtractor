@@ -46,15 +46,6 @@ builder.Services.AddHealthChecks()
 
 var app = builder.Build();
 
-using (var scope = app.Services.CreateScope())
-{
-    var context = scope.ServiceProvider.GetRequiredService<DocumentContext>();
-    if (context.Database.IsRelational())
-        await context.Database.MigrateAsync();
-    else
-        await context.Database.EnsureCreatedAsync();
-}
-
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -69,5 +60,3 @@ app.MapControllers();
 app.MapHealthChecks("/health");
 
 app.Run();
-
-public partial class Program { }

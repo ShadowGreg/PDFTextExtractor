@@ -31,18 +31,4 @@ builder.Services.AddSingleton<IConnection>(sp =>
 builder.Services.AddHostedService<DocumentProcessor>();
 
 var host = builder.Build();
-
-using (var scope = host.Services.CreateScope())
-{
-    var context = scope.ServiceProvider.GetRequiredService<DocumentContext>();
-    try
-    {
-        await context.Database.MigrateAsync();
-    }
-    catch (Exception ex)
-    {
-        Log.Logger.Error(ex, "An error occurred while migrating the database");
-    }
-}
-
 await host.RunAsync();

@@ -33,6 +33,18 @@ services:
       timeout: 5s
       retries: 5
 
+  db-init:
+    build:
+      context: .
+      dockerfile: src/DbMigration/Dockerfile
+    container_name: pdf_db_init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=pdfdb;Username=pdfuser;Password=pdfpass
+    restart: on-failure
+
   api-gateway:
     build:
       context: .
@@ -43,6 +55,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
     ports:
       - "5000:80"
     environment:
@@ -65,6 +79,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
     environment:
       ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=pdfdb;Username=pdfuser;Password=pdfpass
       RabbitMQ__HostName: rabbitmq
