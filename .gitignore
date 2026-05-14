@@ -1,0 +1,49 @@
+## Build output
+bin/
+obj/
+out/
+
+## NuGet
+/packages/
+*.nupkg
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+## User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## IDE
+.idea/
+.vs/
+*.DotSettings.user
+*.DotSettings
+
+## Rider / ReSharper
+riderModule.iml
+/_ReSharper.Caches/
+*.DotSettings
+
+## Logs
+logs/
+*.log
+
+## Runtime / uploads
+uploads/
+
+## Environment / secrets
+appsettings.local.json
+appsettings.*.local.json
+*.env
+.env
+
+## Claude Code
+.claude/
+
+## OS
+.DS_Store
+Thumbs.db

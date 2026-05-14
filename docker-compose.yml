@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: pdf_postgres
+    environment:
+      POSTGRES_DB: pdfdb
+      POSTGRES_USER: pdfuser
+      POSTGRES_PASSWORD: pdfpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdfuser -d pdfdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: pdf_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: rabbituser
+      RABBITMQ_DEFAULT_PASS: rabbitpass
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_aliveness"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: src/ApiGateway/Dockerfile
+    container_name: pdf_api_gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "5000:80"
+    environment:
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=pdfdb;Username=pdfuser;Password=pdfpass
+      RabbitMQ__HostName: rabbitmq
+      RabbitMQ__UserName: rabbituser
+      RabbitMQ__Password: rabbitpass
+      Uploads__Path: /app/uploads
+    volumes:
+      - uploads_data:/app/uploads
+    restart: on-failure
+
+  background-worker:
+    build:
+      context: .
+      dockerfile: src/BackgroundWorker/Dockerfile
+    container_name: pdf_background_worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=pdfdb;Username=pdfuser;Password=pdfpass
+      RabbitMQ__HostName: rabbitmq
+      RabbitMQ__UserName: rabbituser
+      RabbitMQ__Password: rabbitpass
+      Uploads__Path: /app/uploads
+    volumes:
+      - uploads_data:/app/uploads
+    restart: on-failure
+
+volumes:
+  postgres_data:
+  uploads_data:
