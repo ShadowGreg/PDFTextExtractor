@@ -113,13 +113,15 @@ public class DocumentProcessor : BackgroundService
         if (!File.Exists(filePath))
             throw new FileNotFoundException($"PDF file not found at path: {filePath}");
 
-        using var pdfReader = new PdfReader(filePath);
+        var readerProperties = new ReaderProperties().SetPassword(Array.Empty<byte>());
+        using var pdfReader = new PdfReader(filePath, readerProperties);
+        pdfReader.SetUnethicalReading(true);
         using var pdfDoc = new PdfDocument(pdfReader);
 
         var text = new StringBuilder();
         for (var i = 1; i <= pdfDoc.GetNumberOfPages(); i++)
         {
-            var pageText = PdfTextExtractor.GetTextFromPage(pdfDoc.GetPage(i), new SimpleTextExtractionStrategy());
+            var pageText = PdfTextExtractor.GetTextFromPage(pdfDoc.GetPage(i), new LocationTextExtractionStrategy());
             text.AppendLine(pageText);
         }
 
