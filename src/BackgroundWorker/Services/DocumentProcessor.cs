@@ -71,7 +71,7 @@ public class DocumentProcessor : BackgroundService
         await Task.Delay(Timeout.Infinite, stoppingToken).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
     }
 
-    private async Task ProcessDocumentAsync(Guid documentId, CancellationToken cancellationToken)
+    internal async Task ProcessDocumentAsync(Guid documentId, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var context = scope.ServiceProvider.GetRequiredService<DocumentContext>();

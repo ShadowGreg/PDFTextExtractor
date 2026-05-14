@@ -1,185 +1,156 @@
-using System.Reflection;
 using BackgroundWorker.Data;
 using BackgroundWorker.Services;
 using iText.Kernel.Pdf;
-using iText.Layout;
 using iText.Layout.Element;
 using Microsoft.EntityFrameworkCore;
-using Shared.Models;
-using SharedDocument = Shared.Models.Document;
-using PdfLayoutDocument = iText.Layout.Document;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using RabbitMQ.Client;
+using PdfDoc = iText.Layout.Document;
+using SharedDoc = Shared.Models.Document;
+using DocumentStatus = Shared.Models.DocumentStatus;
 
 namespace BackgroundWorker.Tests;
 
 public class DocumentProcessorTests : IDisposable
 {
-    private readonly List<string> _tempFiles = new();
+    private readonly List<string> _tempFiles = [];
 
-    public void Dispose()
-    {
-        foreach (var f in _tempFiles)
-        {
-            if (File.Exists(f))
-                File.Delete(f);
-        }
-    }
+    // -------------------------------------------------------------------------
+    // Builders
+    // -------------------------------------------------------------------------
 
-    // Helpers
-
-    private static DocumentContext CreateInMemoryContext(string dbName)
+    private DocumentProcessor BuildProcessor(out DocumentContext context)
     {
         var options = new DbContextOptionsBuilder<DocumentContext>()
-            .UseInMemoryDatabase(dbName)
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
             .Options;
-        return new DocumentContext(options);
-    }
+        context = new DocumentContext(options);
 
-    private static (DocumentProcessor processor, DocumentContext context) BuildProcessor(string dbName)
-    {
-        var context = CreateInMemoryContext(dbName);
-
+        var capturedContext = context;
         var scope = new Mock<IServiceScope>();
-        scope.Setup(s => s.ServiceProvider.GetService(typeof(DocumentContext))).Returns(context);
+        scope.Setup(s => s.ServiceProvider.GetService(typeof(DocumentContext))).Returns(capturedContext);
 
         var scopeFactory = new Mock<IServiceScopeFactory>();
         scopeFactory.Setup(f => f.CreateScope()).Returns(scope.Object);
 
-        var rabbitConnection = new Mock<IConnection>();
-        var logger = NullLogger<DocumentProcessor>.Instance;
-
-        var processor = new DocumentProcessor(rabbitConnection.Object, scopeFactory.Object, logger);
-        return (processor, context);
+        return new DocumentProcessor(
+            new Mock<IConnection>().Object,
+            scopeFactory.Object,
+            NullLogger<DocumentProcessor>.Instance);
     }
 
-    private static Task InvokeProcessDocumentAsync(DocumentProcessor processor, Guid documentId, CancellationToken ct = default)
-    {
-        var method = typeof(DocumentProcessor).GetMethod(
-            "ProcessDocumentAsync",
-            BindingFlags.NonPublic | BindingFlags.Instance);
-
-        if (method == null)
-            throw new InvalidOperationException("ProcessDocumentAsync method not found via reflection.");
-
-        return (Task)method.Invoke(processor, new object[] { documentId, ct })!;
-    }
-
-    private string CreateTempPdfWithText(string text)
+    private string CreateTempPdf(string text)
     {
         var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.pdf");
         _tempFiles.Add(path);
 
         using var writer = new PdfWriter(path);
         using var pdfDoc = new PdfDocument(writer);
-        using var document = new PdfLayoutDocument(pdfDoc);
-        document.Add(new Paragraph(text));
+        using var doc = new PdfDoc(pdfDoc);
+        doc.Add(new Paragraph(text));
 
         return path;
     }
 
-    private string GetNonExistentTempPath()
+    private string CreateTempCorruptFile()
     {
         var path = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.pdf");
-        // Do NOT create the file; we want it absent.
+        _tempFiles.Add(path);
+        File.WriteAllText(path, "this is not a valid pdf");
         return path;
     }
 
+    private static SharedDoc SeedDocument(DocumentContext context, string filePath, DocumentStatus status = DocumentStatus.Uploaded)
+    {
+        var doc = new SharedDoc
+        {
+            Id = Guid.NewGuid(),
+            OriginalFileName = "test.pdf",
+            FilePath = filePath,
+            Status = status
+        };
+        context.Documents.Add(doc);
+        context.SaveChanges();
+        return doc;
+    }
+
+    // -------------------------------------------------------------------------
     // Tests
+    // -------------------------------------------------------------------------
 
     [Fact]
-    public async Task ProcessDocumentAsync_DocumentNotFound_ReturnsEarlyWithoutStatusChange()
+    public async Task ProcessDocumentAsync_WhenDocumentNotFoundInDb_ReturnsWithoutChanges()
     {
-        var (processor, context) = BuildProcessor(nameof(ProcessDocumentAsync_DocumentNotFound_ReturnsEarlyWithoutStatusChange));
-        var missingId = Guid.NewGuid();
+        // Arrange
+        var processor = BuildProcessor(out var context);
+        var nonExistentId = Guid.NewGuid();
 
-        // Should complete without throwing
-        await InvokeProcessDocumentAsync(processor, missingId);
+        // Act
+        await processor.ProcessDocumentAsync(nonExistentId, CancellationToken.None);
 
-        // DB still has no documents
-        var count = await context.Documents.CountAsync();
-        Assert.Equal(0, count);
+        // Assert
+        Assert.Equal(0, await context.Documents.CountAsync());
     }
 
     [Fact]
-    public async Task ProcessDocumentAsync_PdfFileDoesNotExist_SetsStatusToFailed()
+    public async Task ProcessDocumentAsync_WhenPdfFileIsMissing_SetsStatusToFailed()
     {
-        var (processor, context) = BuildProcessor(nameof(ProcessDocumentAsync_PdfFileDoesNotExist_SetsStatusToFailed));
+        // Arrange
+        var processor = BuildProcessor(out var context);
+        var missingFilePath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.pdf");
+        var doc = SeedDocument(context, missingFilePath);
 
-        var document = new SharedDocument
-        {
-            Id = Guid.NewGuid(),
-            OriginalFileName = "test.pdf",
-            FilePath = GetNonExistentTempPath(),
-            Status = DocumentStatus.Uploaded
-        };
-        context.Documents.Add(document);
-        await context.SaveChangesAsync();
+        // Act
+        await Assert.ThrowsAnyAsync<Exception>(() =>
+            processor.ProcessDocumentAsync(doc.Id, CancellationToken.None));
 
-        // Should throw (FileNotFoundException is rethrown)
-        await Assert.ThrowsAnyAsync<Exception>(() => InvokeProcessDocumentAsync(processor, document.Id));
-
-        var updated = await context.Documents.FindAsync(document.Id);
-        Assert.NotNull(updated);
+        // Assert
+        var updated = await context.Documents.FindAsync(doc.Id);
         Assert.Equal(DocumentStatus.Failed, updated!.Status);
     }
 
     [Fact]
-    public async Task ProcessDocumentAsync_ValidPdf_SetsStatusToCompletedAndPopulatesText()
+    public async Task ProcessDocumentAsync_WhenPdfIsValid_SetsStatusToCompletedAndExtractsText()
     {
-        var (processor, context) = BuildProcessor(nameof(ProcessDocumentAsync_ValidPdf_SetsStatusToCompletedAndPopulatesText));
-
+        // Arrange
+        var processor = BuildProcessor(out var context);
         var expectedText = "Hello from iText7 test PDF";
-        var pdfPath = CreateTempPdfWithText(expectedText);
+        var pdfPath = CreateTempPdf(expectedText);
+        var doc = SeedDocument(context, pdfPath);
+        var beforeProcessing = DateTimeOffset.UtcNow;
 
-        var document = new SharedDocument
-        {
-            Id = Guid.NewGuid(),
-            OriginalFileName = "test.pdf",
-            FilePath = pdfPath,
-            Status = DocumentStatus.Uploaded
-        };
-        context.Documents.Add(document);
-        await context.SaveChangesAsync();
+        // Act
+        await processor.ProcessDocumentAsync(doc.Id, CancellationToken.None);
 
-        var before = DateTimeOffset.UtcNow;
-        await InvokeProcessDocumentAsync(processor, document.Id);
-
-        var updated = await context.Documents.FindAsync(document.Id);
-        Assert.NotNull(updated);
+        // Assert
+        var updated = await context.Documents.FindAsync(doc.Id);
         Assert.Equal(DocumentStatus.Completed, updated!.Status);
-        Assert.NotNull(updated.ExtractedText);
         Assert.Contains(expectedText, updated.ExtractedText);
-        Assert.NotNull(updated.ProcessedAt);
-        Assert.True(updated.ProcessedAt >= before);
+        Assert.True(updated.ProcessedAt >= beforeProcessing);
     }
 
     [Fact]
-    public async Task ProcessDocumentAsync_ExceptionDuringProcessing_SetsStatusToFailedAndRethrows()
+    public async Task ProcessDocumentAsync_WhenPdfIsCorrupt_SetsStatusToFailedAndRethrows()
     {
-        var (processor, context) = BuildProcessor(nameof(ProcessDocumentAsync_ExceptionDuringProcessing_SetsStatusToFailedAndRethrows));
+        // Arrange
+        var processor = BuildProcessor(out var context);
+        var corruptPath = CreateTempCorruptFile();
+        var doc = SeedDocument(context, corruptPath);
 
-        // Point to a file that exists but is not a valid PDF (so iText7 will throw)
-        var invalidPdfPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.pdf");
-        _tempFiles.Add(invalidPdfPath);
-        await File.WriteAllTextAsync(invalidPdfPath, "this is not a pdf");
+        // Act
+        await Assert.ThrowsAnyAsync<Exception>(() =>
+            processor.ProcessDocumentAsync(doc.Id, CancellationToken.None));
 
-        var document = new SharedDocument
-        {
-            Id = Guid.NewGuid(),
-            OriginalFileName = "corrupt.pdf",
-            FilePath = invalidPdfPath,
-            Status = DocumentStatus.Uploaded
-        };
-        context.Documents.Add(document);
-        await context.SaveChangesAsync();
-
-        await Assert.ThrowsAnyAsync<Exception>(() => InvokeProcessDocumentAsync(processor, document.Id));
-
-        var updated = await context.Documents.FindAsync(document.Id);
-        Assert.NotNull(updated);
+        // Assert
+        var updated = await context.Documents.FindAsync(doc.Id);
         Assert.Equal(DocumentStatus.Failed, updated!.Status);
+    }
+
+    public void Dispose()
+    {
+        foreach (var file in _tempFiles.Where(File.Exists))
+            File.Delete(file);
     }
 }
